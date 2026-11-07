@@ -1,0 +1,39 @@
+From 0dd8c0bf26c87a882c94b2ad29d305024c053d37 Mon Sep 17 00:00:00 2001
+From: waydroid-hires <noreply@example.invalid>
+Date: Sat, 7 Nov 2026 12:25:37 +0700
+Subject: [PATCH] audioflinger: request a DIRECT output for one app UID
+
+Waydroid: linear PCM tracks from the UID in persist.waydroid.direct_audio_uid ask for a DIRECT output, so they skip the mixer and keep their own rate and format.
+---
+ services/audioflinger/AudioFlinger.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/services/audioflinger/AudioFlinger.cpp b/services/audioflinger/AudioFlinger.cpp
+index b37dc6f..19f908e 100644
+--- a/services/audioflinger/AudioFlinger.cpp
++++ b/services/audioflinger/AudioFlinger.cpp
+@@ -1089,6 +1089,21 @@ status_t AudioFlinger::createTrack(const media::CreateTrackRequest& _input,
+     if (input.selectedDeviceId != AUDIO_PORT_HANDLE_NONE) {
+         selectedDeviceIds.push_back(input.selectedDeviceId);
+     }
++    {
++        // Waydroid: linear PCM from one app UID asks for a DIRECT output (no mixer, no resampling).
++        // Read per track so `waydroid prop set` takes effect on the next track. If no direct
++        // profile fits, the policy manager drops DIRECT and the track plays through the mixer.
++        const int32_t directUid = property_get_int32("persist.waydroid.direct_audio_uid", -1);
++        if (directUid >= 0 && (int32_t)adjAttributionSource.uid == directUid &&
++            audio_is_linear_pcm(input.config.format) &&
++            !(input.flags & (AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD | AUDIO_OUTPUT_FLAG_MMAP_NOIRQ))) {
++            input.flags = (audio_output_flags_t)((input.flags &
++                    ~(AUDIO_OUTPUT_FLAG_FAST | AUDIO_OUTPUT_FLAG_DEEP_BUFFER)) |
++                    AUDIO_OUTPUT_FLAG_DIRECT);
++            ALOGI("createTrack() direct output for uid %d format %#x rate %u",
++                  directUid, input.config.format, input.config.sample_rate);
++        }
++    }
+     lStatus = AudioSystem::getOutputForAttr(&localAttr, &output.outputId, sessionId, &streamType,
+                                             adjAttributionSource, &input.config, input.flags,
+                                             &selectedDeviceIds, &portId, &secondaryOutputs,
+-- 
+2.56.0
+
