@@ -13,6 +13,7 @@ The patch `patches/hardware_interfaces/0001-audio-pulse-bound-stream-waits.patch
 - never waits on a corked stream. The rest of the buffer goes to the server as pre-roll, and the server keeps what fits in its buffer.
 - gives up on a playing stream that asks for no data within 500 ms. It drops the rest of that buffer, logs one warning per stall (`PulseAudio stream stalled for 500 ms`) and reports the write as done, so AudioFlinger keeps running. When the server asks for data again, playback continues on the same stream and the HAL logs `PulseAudio stream recovered from a stall`.
 - stops waiting at once when the stream has failed.
+- uncorks an output after a flush. A flush leaves the stream in IDLE, and Android resumes from IDLE with a plain write and no start command, so without this a seek would leave the stream corked and silent.
 - limits the connect waits and the cork, flush, drain and gain operations to 2 s (was unlimited for connect and 5 s for the rest), under the 3 s watchdog for calls made inside a binder transaction.
 
 The HAL ships as the vendor APEX `com.android.hardware.audio`. The stock image has it at `/vendor/apex/com.android.hardware.audio.apex` (about 71 MB, not compressed), so the overlay replaces that one file.
@@ -93,7 +94,7 @@ The `strings` line must print the warning text. If apexd rejected the overlaid f
 
 ## 4. Check
 
-`scripts/check-audio-stall.sh` drives pause, play, seek and track changes on the running session and prints PASS when `audioserver` kept its pid, no new tombstone appeared and no watchdog timeout was logged. Run it as your own user (not with `sudo`); it calls `sudo waydroid shell` itself.
+`scripts/check-audio-stall.sh` drives pause, play, seek and track changes on the running session and prints PASS when `audioserver` kept its pid, no new tombstone appeared, no watchdog timeout was logged and a Waydroid stream is still playing on the host at the end (`pactl` shows it not corked). It refuses to start when no Waydroid stream is playing. Run it as your own user (not with `sudo`); it calls `sudo waydroid shell` itself.
 
 Start a hi-res track in Apple Music, then:
 

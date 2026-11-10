@@ -1,4 +1,4 @@
-From c6c19bb9ff598471e057a1e68006a7aa9f318862 Mon Sep 17 00:00:00 2001
+From 87b21081af6725302f3bd2c91f8b80c6af361bee Mon Sep 17 00:00:00 2001
 From: Aldi Oktaviana Hidayat <aldiokta10@hotmail.co.id>
 Date: Tue, 10 Nov 2026 18:14:21 +0700
 Subject: [PATCH] audio: pulse: bound stream waits
@@ -23,16 +23,24 @@ Bound every wait on the PulseAudio server:
   of the buffer, logs one warning per stall and reports the write as
   done, so AudioFlinger keeps running and playback resumes on its own.
 - A stream that is no longer ready stops the wait at once.
+- An output is uncorked after a flush. The worker goes from PAUSED to
+  IDLE on flush, and the framework resumes from IDLE with a plain burst
+  and no start command, so a seek (pause, flush, write) used to leave
+  the stream corked: the write that hung before would now play silence.
 - The context and stream connect waits get a 2 s deadline, and the
   operation timeout for cork, flush, drain and gain drops from 5 s to
   2 s, under the 3 s watchdog for calls made inside a binder
   transaction.
+- A stream connect that times out is disconnected and its latency
+  callback cleared, since the stream object can be freed before the
+  server answers.
 ---
  .../default/include/core-impl/StreamPulse.h   |  3 ++
- audio/aidl/default/pulse/Context.cpp          | 33 ++++++++++----
+ .../default/primary/StreamPrimaryPulse.cpp    |  4 +-
+ audio/aidl/default/pulse/Context.cpp          | 33 ++++++++++---
  audio/aidl/default/pulse/Context.h            |  6 +++
- audio/aidl/default/pulse/StreamPulse.cpp      | 43 ++++++++++++++++---
- 4 files changed, 70 insertions(+), 15 deletions(-)
+ audio/aidl/default/pulse/StreamPulse.cpp      | 49 ++++++++++++++++---
+ 5 files changed, 78 insertions(+), 17 deletions(-)
 
 diff --git a/audio/aidl/default/include/core-impl/StreamPulse.h b/audio/aidl/default/include/core-impl/StreamPulse.h
 index 077eae8..dd367f5 100644
@@ -49,6 +57,21 @@ index 077eae8..dd367f5 100644
  
      // Only 'libnbaio_mono' is vendor-accessible, thus no access to the multi-reader Pipe.
      ::android::sp<::android::MonoPipe> mRecordSink;
+diff --git a/audio/aidl/default/primary/StreamPrimaryPulse.cpp b/audio/aidl/default/primary/StreamPrimaryPulse.cpp
+index 883d429..14d68ea 100644
+--- a/audio/aidl/default/primary/StreamPrimaryPulse.cpp
++++ b/audio/aidl/default/primary/StreamPrimaryPulse.cpp
+@@ -49,7 +49,9 @@ StreamPrimaryPulse::StreamPrimaryPulse(StreamContext* context, const Metadata& m
+ ::android::status_t StreamPrimaryPulse::flush() {
+     RETURN_STATUS_IF_ERROR(StreamPulse::flush());
+     // TODO(b/372951987): consider if this needs to be done from 'StreamInWorkerLogic::cycle'.
+-    return mIsInput ? standby() : ::android::OK;
++    // A flushed output goes to IDLE, and the next burst makes it ACTIVE without a start
++    // command, so uncork here. Otherwise the stream stays corked after a seek (pause, flush).
++    return mIsInput ? standby() : start();
+ }
+ 
+ ::android::status_t StreamPrimaryPulse::start() {
 diff --git a/audio/aidl/default/pulse/Context.cpp b/audio/aidl/default/pulse/Context.cpp
 index ae9df10..ece1f03 100644
 --- a/audio/aidl/default/pulse/Context.cpp
@@ -137,23 +160,29 @@ index d52c4d3..05160c0 100644
      bool waitForStreamOperation(const std::function<pa_operation*(pa_stream_success_cb_t, std::promise<bool>*)>& lambda);
      void withLock(const std::function<void()>& lambda);
 diff --git a/audio/aidl/default/pulse/StreamPulse.cpp b/audio/aidl/default/pulse/StreamPulse.cpp
-index 13e02e4..66b9f54 100644
+index 13e02e4..66ae575 100644
 --- a/audio/aidl/default/pulse/StreamPulse.cpp
 +++ b/audio/aidl/default/pulse/StreamPulse.cpp
-@@ -139,9 +139,9 @@ StreamPulse::~StreamPulse() {
+@@ -138,10 +138,14 @@ StreamPulse::~StreamPulse() {
+         }
  
          // Wait until context is ready
-         if (connectRet == 0) {
+-        if (connectRet == 0) {
 -            while (pa_stream_get_state(mPAStream) == PA_STREAM_CREATING) {
 -                pa_threaded_mainloop_wait(mPACtx->mMainloop.get());
 -            }
-+            mPACtx->waitUntil(pa_rtclock_now() + pulse::Context::kOperationTimeoutUs, [&]() {
++        if (connectRet == 0 &&
++            !mPACtx->waitUntil(pa_rtclock_now() + pulse::Context::kOperationTimeoutUs, [&]() {
 +                return pa_stream_get_state(mPAStream) != PA_STREAM_CREATING;
-+            });
++            })) {
++            // The stream may still become ready after this object is gone, and the latency
++            // callback writes into it.
++            pa_stream_set_latency_update_callback(mPAStream, nullptr, nullptr);
++            pa_stream_disconnect(mPAStream);
          }
      });
  
-@@ -254,15 +254,39 @@ StreamPulse::~StreamPulse() {
+@@ -254,15 +258,39 @@ StreamPulse::~StreamPulse() {
              if (remainingFrames != 0) usleep(1000);
          }
      } else {
@@ -191,13 +220,13 @@ index 13e02e4..66b9f54 100644
  
 -                size_t bytesToWrite = std::min(writable, remainingBytes);
 +                // Only a corked stream gets here with nothing writable. It asks for no more than
-+                // one target latency of data, so the rest is sent as pre-roll for resume.
++                // one target latency of data, so the rest is sent as pre-roll for start.
 +                const size_t bytesToWrite =
 +                        writable == 0 ? remainingBytes : std::min(writable, remainingBytes);
                  if (pa_stream_write(mPAStream, bufferOffset, bytesToWrite, nullptr, 0, PA_SEEK_RELATIVE) < 0) {
                      LOG(ERROR) << fname << ": Failed to write into PulseAudio: " << mPACtx->getLastError();
                      return;
-@@ -271,6 +295,11 @@ StreamPulse::~StreamPulse() {
+@@ -271,6 +299,11 @@ StreamPulse::~StreamPulse() {
                  bufferOffset += bytesToWrite;
                  remainingBytes -= bytesToWrite;
              }

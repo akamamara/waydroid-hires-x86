@@ -34,7 +34,13 @@ fi
 wd() { sudo waydroid shell -- "$@" | tr -d '\r'; }
 pid() { wd pidof audioserver || true; }
 newest_tombstone() { wd sh -c 'ls -t /data/tombstones 2>/dev/null | head -n 1'; }
-dispatch() { wd sh -c "$1" >/dev/null 2>&1 || echo "dispatch failed: $1"; }
+# waydroid shell drops the container command's exit status, so a failed dispatch is not visible here.
+dispatch() { wd sh -c "$1" >/dev/null 2>&1; }
+# Waydroid sink inputs on the host that are not corked, i.e. actually playing.
+playing_streams() {
+    pactl list sink-inputs | awk '/^Sink Input/ {c = ""} /Corked:/ {c = $2}
+        /application.id = "id.waydro.waydroid"/ && c == "no" {n++} END {print n + 0}'
+}
 
 if ! waydroid status 2>/dev/null | grep -Eq 'Session:[[:space:]]+RUNNING'; then
     echo "Waydroid session is not running. Start it with 'waydroid session start' and play a track." >&2
@@ -49,13 +55,20 @@ fi
 tomb_before=$(newest_tombstone)
 # logcat prints the container's local time, so take the start time from the container.
 start_time=$(wd date '+%m-%d %H:%M:%S.000')
+if [[ $(playing_streams) -eq 0 ]]; then
+    echo "No Waydroid stream is playing on the host. Start a track first." >&2
+    exit 2
+fi
 
-suspended=0
+sink=""  # the suspended sink, if any
 resume_sink() {
-    if [[ $suspended -eq 1 ]]; then
-        pactl suspend-sink @DEFAULT_SINK@ 0 && suspended=0
-        echo "sink resumed"
+    [[ -n $sink ]] || return 0
+    if pactl suspend-sink "$sink" 0; then
+        echo "sink $sink resumed"
+    else
+        echo "WARNING: could not resume sink $sink. Run: pactl suspend-sink $sink 0" >&2
     fi
+    sink=""
 }
 trap resume_sink EXIT
 trap 'exit 130' INT TERM
@@ -70,8 +83,9 @@ stall_done=0
 actions=(pause play pause play fast-forward rewind next previous)
 while ((SECONDS < end)); do
     if ((stall > 0 && stall_done == 0 && SECONDS >= stall_at)); then
-        echo "suspending the default sink for ${stall}s"
-        pactl suspend-sink @DEFAULT_SINK@ 1 && suspended=1
+        s=$(pactl get-default-sink)
+        echo "suspending sink $s for ${stall}s"
+        if pactl suspend-sink "$s" 1; then sink=$s; else echo "could not suspend sink $s" >&2; fi
         sleep "$stall"
         resume_sink
         stall_done=1
@@ -89,6 +103,8 @@ while ((SECONDS < end)); do
     sleep "$((RANDOM % 3)).$((RANDOM % 10))"
 done
 ((commands == 0)) || dispatch "cmd media_session dispatch play"
+sleep 3
+playing_after=$(playing_streams)
 
 pid_after=$(pid)
 tomb_after=$(newest_tombstone)
@@ -110,6 +126,7 @@ fail=()
 [[ -z $pid_after || $pid_after == "$pid_before" ]] || fail+=("audioserver restarted, new pid $pid_after")
 [[ $tomb_after == "$tomb_before" ]] || fail+=("new tombstone $tomb_after")
 [[ -z $timecheck ]] || fail+=("watchdog timeout logged")
+((playing_after > 0)) || fail+=("no Waydroid stream is playing on the host at the end")
 
 if ((${#fail[@]})); then
     printf 'FAIL: %s\n' "${fail[@]}"
