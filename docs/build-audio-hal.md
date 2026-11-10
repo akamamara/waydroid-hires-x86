@@ -120,7 +120,15 @@ Build (2026-11-10, a 27 GB RAM / 12-core host, tree at `hardware/interfaces` `li
 - The APEX is 71,159,808 bytes. Its HAL binary `bin/hw/android.hardware.audio.service-aidl.example` holds the new stall and recovery log text.
 - Its `apex_pubkey` and manifest name match the stock `com.android.hardware.audio.apex` from the 20261017 vendor image.
 
-Install and the device checks above: not run yet.
+Install and seek check (2026-11-10, same machine, Apple Music playing a 44.1 kHz lossless track on the DIRECT output, `AudioOut_35`):
+
+- apexd took the overlaid APEX. `/apex/com.android.hardware.audio` holds the new HAL binary, and `strings` shows the stall and recovery text.
+- Nine seeks by tapping the progress bar. Each one logged `pause`, `flush` and then `start` from `AHAL_StreamPulse`. The `start` right after the flush is the new uncork.
+- After every seek, the Waydroid sink input showed `Corked: no` in `pactl`, and the position kept moving (for example 3:42, then 3:54 eight seconds later).
+- `audioserver` kept pid 286 the whole time. There were no `stalled`, `not ready` or `TimeCheck` lines and no crash-buffer entries.
+- Apple Music ignores `cmd media_session dispatch fast-forward` and `rewind`, so those keys do not seek in it. Seeks have to come from the app's own controls.
+
+The 15-minute stress run, the host-stall run, the normal-playback runs and the rollback check: not run yet.
 
 ## Rollback
 
