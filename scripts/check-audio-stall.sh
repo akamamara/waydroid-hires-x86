@@ -31,21 +31,24 @@ if [[ $EUID -eq 0 ]]; then
     exit 2
 fi
 
-wd() { sudo waydroid shell -- "$@"; }
+wd() { sudo waydroid shell -- "$@" | tr -d '\r'; }
+pid() { wd pidof audioserver || true; }
+newest_tombstone() { wd sh -c 'ls -t /data/tombstones 2>/dev/null | head -n 1'; }
+dispatch() { wd sh -c "$1" >/dev/null 2>&1 || echo "dispatch failed: $1"; }
 
 if ! waydroid status 2>/dev/null | grep -Eq 'Session:[[:space:]]+RUNNING'; then
     echo "Waydroid session is not running. Start it with 'waydroid session start' and play a track." >&2
     exit 2
 fi
 
-pid_before=$(wd pidof audioserver | tr -d '\r' || true)
+pid_before=$(pid)
 if [[ -z $pid_before ]]; then
     echo "audioserver is not running in the container." >&2
     exit 2
 fi
-tomb_before=$(wd sh -c 'ls -t /data/tombstones 2>/dev/null | head -n 1' | tr -d '\r')
+tomb_before=$(newest_tombstone)
 # logcat prints the container's local time, so take the start time from the container.
-start_time=$(wd date '+%m-%d %H:%M:%S.000' | tr -d '\r')
+start_time=$(wd date '+%m-%d %H:%M:%S.000')
 
 suspended=0
 resume_sink() {
@@ -76,18 +79,20 @@ while ((SECONDS < end)); do
     fi
     if ((commands == 1)); then
         action=${actions[RANDOM % ${#actions[@]}]}
-        wd cmd media_session dispatch "$action" >/dev/null 2>&1 || echo "dispatch $action failed"
-        # Leave playback running after each command so the next one hits a live stream.
-        [[ $action == pause ]] || wd cmd media_session dispatch play >/dev/null 2>&1 || true
+        # Play again after anything but pause, so the next command hits a running stream.
+        if [[ $action == pause ]]; then
+            dispatch "cmd media_session dispatch pause"
+        else
+            dispatch "cmd media_session dispatch $action && cmd media_session dispatch play"
+        fi
     fi
     sleep "$((RANDOM % 3)).$((RANDOM % 10))"
 done
-# Finish in the playing state.
-((commands == 0)) || wd cmd media_session dispatch play >/dev/null 2>&1 || true
+((commands == 0)) || dispatch "cmd media_session dispatch play"
 
-pid_after=$(wd pidof audioserver | tr -d '\r' || true)
-tomb_after=$(wd sh -c 'ls -t /data/tombstones 2>/dev/null | head -n 1' | tr -d '\r')
-log=$(wd logcat -d -T "$start_time" 2>/dev/null | tr -d '\r' || true)
+pid_after=$(pid)
+tomb_after=$(newest_tombstone)
+log=$(wd logcat -d -T "$start_time" 2>/dev/null || true)
 timecheck=$(grep -F 'TimeCheck timeout' <<<"$log" || true)
 pulse=$(grep -E 'AHAL_StreamPulse.*(stalled|recovered|not ready|Failed to write)' <<<"$log" || true)
 
