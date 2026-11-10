@@ -94,16 +94,16 @@ The `strings` line must print the warning text. If apexd rejected the overlaid f
 
 ## 4. Check
 
-`scripts/check-audio-stall.sh` drives pause, play, seek and track changes on the running session and prints PASS when `audioserver` kept its pid, no new tombstone appeared, no watchdog timeout was logged and a Waydroid stream is still playing on the host at the end (`pactl` shows it not corked). It refuses to start when no Waydroid stream is playing. Run it as your own user (not with `sudo`); it calls `sudo waydroid shell` itself.
+`scripts/check-audio-stall.sh` drives pause, play, seek and track changes on the running session and prints PASS when `audioserver` kept its pid, no new tombstone appeared, no watchdog timeout was logged and a Waydroid stream is still playing on the host at the end (`pactl` shows it not corked). It refuses to start when no Waydroid stream is playing. Run it as your own user (not with `sudo`); it calls `sudo waydroid shell` itself. To avoid the password prompts, point it at Waydroid's adb instead: `WAYDROID_ADB=192.168.240.112:5555` (the IP from `waydroid status`, after `adb connect`). Apple Music ignores the fast-forward and rewind keys the script sends, so for real seeks tap the app's progress bar while the script runs (`adb shell input tap <x> <y>`).
 
 Start a hi-res track in Apple Music, then:
 
 ```sh
 scripts/check-audio-stall.sh -d 900            # 15 minutes of pause, play, seek, next and previous
-scripts/check-audio-stall.sh -d 60 -s 10 -n    # one 10 s host sink suspend, no commands
+scripts/check-audio-stall.sh -d 60 -s 10 -n    # one 10 s freeze of the host audio server, no commands
 ```
 
-For the second run, listen: playback should go on by itself within about a second after the sink resumes. The script prints the HAL's stall and recovery lines. If it notes that no stall warning was logged, the sink suspend did not stall the stream on your PipeWire setup, and the run proves nothing about stalls.
+The second run stops `pipewire-pulse` (or `pulseaudio`) with SIGSTOP for 10 s and resumes it with SIGCONT, also on Ctrl-C. All host audio pauses meanwhile. `pactl suspend-sink` is not used, because PipeWire ignores it for a sink that is in use, so it never stalls the stream. Listen: playback should go on by itself within about a second after the server resumes. The script prints the HAL's stall and recovery lines. If it notes that no stall warning was logged, the run proves nothing about stalls.
 
 Normal playback must not change. Play 10 minutes through the mixer (any app other than the DIRECT one, 44.1 kHz/16-bit) and 10 minutes through DIRECT (a 96 kHz track in Apple Music), then:
 
@@ -128,7 +128,13 @@ Install and seek check (2026-11-10, same machine, Apple Music playing a 44.1 kHz
 - `audioserver` kept pid 286 the whole time. There were no `stalled`, `not ready` or `TimeCheck` lines and no crash-buffer entries.
 - Apple Music ignores `cmd media_session dispatch fast-forward` and `rewind`, so those keys do not seek in it. Seeks have to come from the app's own controls.
 
-The 15-minute stress run, the host-stall run, the normal-playback runs and the rollback check: not run yet.
+Check script runs (same session, over adb):
+
+- 15-minute stress run (`-d 900`) with 42 progress-bar taps for seeks alongside: PASS. `audioserver` kept pid 286, no new tombstone. The HAL logged 58 pauses, 31 flushes, 58 starts and 11 new streams from track changes, with no stall, not-ready or write-failure lines.
+- Host stall: `pactl suspend-sink` on the EasyEffects sink and on the real output sink stalled nothing, which is why the script now freezes the server instead. Three 10 s freezes during playback, the last through the script (`-d 60 -s 10 -n`, PASS). Each time the HAL logged one stall warning after 500 ms and `recovered from a stall` about 0.5 s after the server resumed, `audioserver` kept its pid, and the track went on playing (for example 2:13, then 2:19 five seconds later).
+- One earlier freeze, right after the stress run, ended with Apple Music stopping 0.6 s into the freeze (it gave up audio focus and was paused at position 0). The pause AudioFlinger then sent hit the 2 s limit against the frozen server and the stream was closed, without an `audioserver` restart. It did not happen again in the next three freezes with a track known to be mid-play, so the track most likely ended there; this is not proven.
+
+The normal-playback runs and the rollback check: not run yet.
 
 ## Rollback
 

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Drive pause, play, seek and track changes on the running Waydroid session and
-# report whether audioserver survived. Optionally suspend the host sink to force
-# a PulseAudio stall.
+# report whether audioserver survived. Optionally freeze the host's PulseAudio
+# server to force a stall.
 #
 # Run as your own user, not under sudo: pactl must reach your pipewire-pulse.
 # The script calls `sudo waydroid shell` itself, so it may ask for your password.
+# Set WAYDROID_ADB=<ip>:5555 (from `waydroid status`) to use adb instead of sudo.
 #
 # Usage: scripts/check-audio-stall.sh [-d SECONDS] [-s SECONDS] [-n]
 #   -d SECONDS  how long to run (default 120)
-#   -s SECONDS  suspend the default sink for this long, halfway through the run
+#   -s SECONDS  freeze pipewire-pulse (or pulseaudio) for this long, halfway through
+#               the run. All host audio stops meanwhile.
 #   -n          send no media commands (use with -s to check that playback
 #               resumes on its own after the stall)
 # Exit: 0 PASS, 1 FAIL, 2 could not run.
@@ -22,7 +24,7 @@ while getopts "d:s:nh" opt; do
         d) duration=$OPTARG ;;
         s) stall=$OPTARG ;;
         n) commands=0 ;;
-        *) sed -n '2,14p' "$0"; exit 2 ;;
+        *) sed -n '2,15p' "$0"; exit 2 ;;
     esac
 done
 
@@ -31,7 +33,12 @@ if [[ $EUID -eq 0 ]]; then
     exit 2
 fi
 
-wd() { sudo waydroid shell -- "$@" | tr -d '\r'; }
+if [[ -n ${WAYDROID_ADB:-} ]]; then
+    # adb joins its arguments into one shell command line, so quote each one.
+    wd() { adb -s "$WAYDROID_ADB" shell "$(printf '%q ' "$@")" | tr -d '\r'; }
+else
+    wd() { sudo waydroid shell -- "$@" | tr -d '\r'; }
+fi
 pid() { wd pidof audioserver || true; }
 newest_tombstone() { wd sh -c 'ls -t /data/tombstones 2>/dev/null | head -n 1'; }
 # waydroid shell drops the container command's exit status, so a failed dispatch is not visible here.
@@ -60,17 +67,17 @@ if [[ $(playing_streams) -eq 0 ]]; then
     exit 2
 fi
 
-sink=""  # the suspended sink, if any
-resume_sink() {
-    [[ -n $sink ]] || return 0
-    if pactl suspend-sink "$sink" 0; then
-        echo "sink $sink resumed"
+frozen=""  # pid of the frozen server, if any
+resume_server() {
+    [[ -n $frozen ]] || return 0
+    if kill -CONT "$frozen"; then
+        echo "server $frozen resumed"
     else
-        echo "WARNING: could not resume sink $sink. Run: pactl suspend-sink $sink 0" >&2
+        echo "WARNING: could not resume the audio server. Run: kill -CONT $frozen" >&2
     fi
-    sink=""
+    frozen=""
 }
-trap resume_sink EXIT
+trap resume_server EXIT
 trap 'exit 130' INT TERM
 
 echo "audioserver pid $pid_before, newest tombstone '${tomb_before:-none}', start $start_time"
@@ -83,11 +90,12 @@ stall_done=0
 actions=(pause play pause play fast-forward rewind next previous)
 while ((SECONDS < end)); do
     if ((stall > 0 && stall_done == 0 && SECONDS >= stall_at)); then
-        s=$(pactl get-default-sink)
-        echo "suspending sink $s for ${stall}s"
-        if pactl suspend-sink "$s" 1; then sink=$s; else echo "could not suspend sink $s" >&2; fi
+        # pactl suspend-sink does not stall a sink that is in use on PipeWire, so stop the server.
+        server=$(pgrep -xu "$USER" pipewire-pulse || pgrep -xu "$USER" pulseaudio || true)
+        echo "freezing audio server ${server:-?} for ${stall}s"
+        if [[ -n $server ]] && kill -STOP "$server"; then frozen=$server; else echo "could not freeze the audio server" >&2; fi
         sleep "$stall"
-        resume_sink
+        resume_server
         stall_done=1
         continue
     fi
@@ -118,7 +126,7 @@ echo "newest tombstone: before '${tomb_before:-none}', after '${tomb_after:-none
 [[ -z $timecheck ]] || printf 'watchdog lines:\n%s\n' "$timecheck"
 [[ -z $pulse ]] || printf 'HAL stall lines:\n%s\n' "$pulse"
 if ((stall > 0)) && ! grep -q stalled <<<"$pulse"; then
-    echo "note: no stall warning was logged, so the sink suspend may not have stalled the stream"
+    echo "note: no stall warning was logged, so the freeze may not have stalled the stream"
 fi
 
 fail=()

@@ -27,7 +27,7 @@ Tested on one install: Apple Music plays a 96 kHz float track on its own DIRECT 
 | `patches/hardware_interfaces/0001-audio-pulse-bound-stream-waits.patch` | The source patch for `hardware/interfaces` that stops the audio HAL from blocking `audioserver` on a stalled PulseAudio stream. |
 | `docs/build-libaudioflinger.md` | Step-by-step guide to build the patched `audioserver`, install it, test it and roll back. |
 | `docs/build-audio-hal.md` | Why the HAL fix is needed, and how to build, install, check and roll back the fixed HAL APEX. |
-| `scripts/check-audio-stall.sh` | Drives pause, play, seek and track changes (and optionally a host sink suspend) and reports whether `audioserver` survived. |
+| `scripts/check-audio-stall.sh` | Drives pause, play, seek and track changes (and optionally a 10 s freeze of the host audio server) and reports whether `audioserver` survived. |
 | `docs/plans/` | The plan this was built from. Its overlay target is out of date; the build guide has the correction. |
 | `docs/handoff-libaudioflinger.md` | Session handoff with current state and open items. |
 | `reports/`, `research_notes/` | Research behind the design. Start with the "Verified corrections" section of the report. |
