@@ -21,9 +21,13 @@ Tested on one install: Apple Music plays a 96 kHz float track on its own DIRECT 
 |---|---|
 | `overlay/vendor/etc/primary_audio_policy_configuration.xml` | The shipped policy XML plus a float profile (44.1 to 192 kHz) on the primary output and a new `direct output` port. |
 | `overlay/system/bin/audioserver` | `audioserver` built from the WayDroid-ATV `lineage-24.0` tree (BUILD_ID `CP2A.260605.016`) with the patch. |
+| `overlay/vendor/apex/com.android.hardware.audio.apex` | The AIDL audio HAL built from the same tree with the PulseAudio stall fix. It replaces the stock vendor APEX. |
 | `overlay/system/lib64/libaudioflinger.so` | A by-product of the same build. `audioserver` links AudioFlinger statically and never loads this file, so installing it does nothing. |
 | `patches/frameworks_av/0001-audioflinger-direct-output-for-uid.patch` | The source patch for `frameworks/av`, so you can rebuild it yourself. |
+| `patches/hardware_interfaces/0001-audio-pulse-bound-stream-waits.patch` | The source patch for `hardware/interfaces` that stops the audio HAL from blocking `audioserver` on a stalled PulseAudio stream. |
 | `docs/build-libaudioflinger.md` | Step-by-step guide to build the patched `audioserver`, install it, test it and roll back. |
+| `docs/build-audio-hal.md` | Why the HAL fix is needed, and how to build, install, check and roll back the fixed HAL APEX. |
+| `scripts/check-audio-stall.sh` | Drives pause, play, seek and track changes (and optionally a 10 s freeze of the host audio server) and reports whether `audioserver` survived. |
 | `docs/plans/` | The plan this was built from. Its overlay target is out of date; the build guide has the correction. |
 | `docs/handoff-libaudioflinger.md` | Session handoff with current state and open items. |
 | `reports/`, `research_notes/` | Research behind the design. Start with the "Verified corrections" section of the report. |
@@ -59,7 +63,16 @@ sudo waydroid shell cmd package list packages -U | grep -i apple      # package:
 waydroid prop set persist.waydroid.direct_audio_uid 10113
 ```
 
-**3. Restart**
+**3. Stall fix for the audio HAL (recommended with step 2)**
+
+Without it, pausing or seeking on the DIRECT output can hang the HAL, and the watchdog then kills `audioserver`. Apps such as Apple Music stay unable to play until they are force-stopped.
+
+```sh
+sudo mkdir -p /var/lib/waydroid/overlay/vendor/apex
+sudo install -m 644 -o root -g root overlay/vendor/apex/com.android.hardware.audio.apex /var/lib/waydroid/overlay/vendor/apex/
+```
+
+**4. Restart**
 
 ```sh
 sudo waydroid session stop && sudo systemctl restart waydroid-container && waydroid session start
@@ -81,6 +94,7 @@ You should see a DIRECT thread at the track's rate carrying the app's track, and
 
 ```sh
 sudo rm -f /var/lib/waydroid/overlay/system/bin/audioserver
+sudo rm -f /var/lib/waydroid/overlay/vendor/apex/com.android.hardware.audio.apex
 sudo rm -f /var/lib/waydroid/overlay/vendor/etc/primary_audio_policy_configuration.xml
 sudo waydroid session stop && sudo systemctl restart waydroid-container && waydroid session start
 ```
@@ -93,10 +107,13 @@ sudo waydroid session stop && sudo systemctl restart waydroid-container && waydr
 - **Gapless playback is not guaranteed.** Each new track opens a new DIRECT thread.
 - **The host's PipeWire must allow the rate.** If `default.clock.allowed-rates` lacks it, PipeWire resamples on the host. Check with `pw-top`.
 - **Only linear PCM tracks are redirected.** Compressed or offload streams are not.
+- **Without the HAL stall fix, `audioserver` can be killed by its watchdog.** The stock HAL waits forever on a paused or stalled PulseAudio stream. Tracks then seem to fail at random until the app is force-stopped. Install the fixed APEX (step 3). See [docs/build-audio-hal.md](docs/build-audio-hal.md).
+- **With the fix, a stall still costs a short gap.** A stream that asks for no data for 500 ms has the rest of that write dropped, and playback continues when the host asks for data again.
+- **A restart of the host's `pipewire-pulse` silences Waydroid until the session restarts.** The HAL connects to PulseAudio once per process and does not reconnect.
 
 ## Building it yourself
 
-See [docs/build-libaudioflinger.md](docs/build-libaudioflinger.md). In short: sync the WayDroid-ATV `lineage-24.0` tree, apply the patch to `frameworks/av`, run `lunch lineage_waydroid_x86_64_only-cp2a-userdebug`, then `m audioserver`. A full tree needs about 250 GB of free disk, and the analysis step is memory-hungry; a 16 GB machine may need a large swapfile or a bigger machine.
+See [docs/build-libaudioflinger.md](docs/build-libaudioflinger.md). In short: sync the WayDroid-ATV `lineage-24.0` tree, apply the patch to `frameworks/av`, run `lunch lineage_waydroid_x86_64_only-cp2a-userdebug`, then `m audioserver`. For the HAL stall fix, apply the `hardware/interfaces` patch and run `m com.android.hardware.audio`; see [docs/build-audio-hal.md](docs/build-audio-hal.md). A full tree needs about 250 GB of free disk, and the analysis step is memory-hungry; a 16 GB machine may need a large swapfile or a bigger machine.
 
 ## Licence
 
